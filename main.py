@@ -67,7 +67,16 @@ class CJWatchdog(Star):
         logger.warning("%s " + message, LOG_PREFIX, *args, exc_info=exc_info)
 
     def _event_context(self, event: AstrMessageEvent, mask: bool = True) -> str:
-        parts = []
+        parts: Dict[str, Any] = {}
+
+        def _add(attr: str, value: Any) -> None:
+            if value in (None, "", 0):
+                return
+            if mask and attr in {"user_id", "sender_id"}:
+                value = self._mask_value(value)
+            if attr not in parts:
+                parts[attr] = value
+
         umo = getattr(event, "unified_msg_origin", None)
         if umo is not None:
             for attr in (
@@ -80,20 +89,14 @@ class CJWatchdog(Star):
                 "bot_id",
                 "app_id",
             ):
-                value = getattr(umo, attr, None)
-                if value not in (None, "", 0):
-                    if mask and attr in {"user_id", "sender_id"}:
-                        value = self._mask_value(value)
-                    parts.append(f"{attr}={value}")
+                _add(attr, getattr(umo, attr, None))
         for attr in ("platform", "group_id", "channel_id", "guild_id", "user_id", "sender_id"):
-            value = getattr(event, attr, None)
-            if value not in (None, "", 0):
-                if mask and attr in {"user_id", "sender_id"}:
-                    value = self._mask_value(value)
-                parts.append(f"{attr}={value}")
+            if attr in parts:
+                continue
+            _add(attr, getattr(event, attr, None))
         if not parts:
-            parts.append("context=unknown")
-        return " ".join(parts)
+            return "context=unknown"
+        return " ".join(f"{key}={value}" for key, value in parts.items())
 
     def _mask_value(self, value: Any) -> str:
         text = str(value)
@@ -117,7 +120,7 @@ class CJWatchdog(Star):
             if isinstance(plugins_cfg, dict):
                 nested_cfg = plugins_cfg.get(PLUGIN_ID)
                 if isinstance(nested_cfg, dict):
-                    plugin_cfg = {**nested_cfg, **plugin_cfg}
+                    plugin_cfg = {**plugin_cfg, **nested_cfg}
         init_timeout = self._coerce_positive_int(
             plugin_cfg.get("init_timeout_seconds", INIT_TIMEOUT_SECONDS), INIT_TIMEOUT_SECONDS
         )
@@ -133,12 +136,40 @@ class CJWatchdog(Star):
             return default
         return parsed if parsed > 0 else default
 
+    def _coerce_nonneg_int(self, value: Any, default: int = 0) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed >= 0 else default
+
+    def _coerce_bool(self, value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"true", "1", "yes", "y", "on"}:
+                return True
+            if text in {"false", "0", "no", "n", "off"}:
+                return False
+        return default
+
     def _load_state(self) -> Dict[str, Any]:
         def _normalize_state(data: Dict[str, Any]) -> Dict[str, Any]:
             timeouts = data.get("timeouts")
             bans = data.get("bans")
-            data["timeouts"] = timeouts if isinstance(timeouts, dict) else {}
-            data["bans"] = bans if isinstance(bans, dict) else {}
+            timeouts = timeouts if isinstance(timeouts, dict) else {}
+            bans = bans if isinstance(bans, dict) else {}
+            clean_timeouts: Dict[str, int] = {}
+            for key, value in timeouts.items():
+                clean_timeouts[str(key)] = self._coerce_nonneg_int(value, 0)
+            clean_bans: Dict[str, bool] = {}
+            for key, value in bans.items():
+                clean_bans[str(key)] = self._coerce_bool(value, False)
+            data["timeouts"] = clean_timeouts
+            data["bans"] = clean_bans
             return data
 
         if not self._state_path.exists():
@@ -192,7 +223,8 @@ class CJWatchdog(Star):
                 if name in self._timeouts:
                     self._timeouts.pop(name, None)
                 continue
-            new_count = int(self._timeouts.get(name, 0)) + 1
+            current = self._coerce_nonneg_int(self._timeouts.get(name, 0), 0)
+            new_count = current + 1
             self._timeouts[name] = new_count
             self._log_warning(
                 "Plugin %s init timeout count: %s ctx=%s", name, new_count, SYSTEM_CONTEXT
@@ -237,7 +269,7 @@ class CJWatchdog(Star):
                 result = await result
             if isinstance(result, bool):
                 return result
-            return True
+            return False
         except TypeError as exc:
             self._log_warning(
                 "Manager method %s raised TypeError: %s", method, exc, exc_info=True
@@ -329,6 +361,7 @@ class CJWatchdog(Star):
             await self._ban_plugin(name, reason="manual", ctx=ctx)
             yield event.plain_result(f"已ban插件: {name}")
 
+    @permission_type(PermissionType.ADMIN)
     @filter.command("testapi")
     async def testapi(self, event: AstrMessageEvent):
         self._log_info("Command testapi called. ctx=%s", self._event_context(event))

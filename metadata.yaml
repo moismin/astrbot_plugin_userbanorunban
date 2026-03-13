@@ -1,6 +1,6 @@
-name: astrbot_plugin_chat_polisher超时插件守护
+name: 超时插件守护
 display_name: 超时插件守护
 version: 1.0.0
 author: moismin
-description: 检测插件初始化超时并可手动ban
+description: 检测插件初始化超时并可手动ban/unban插件
 repo: https://github.com/moismin/astrbot_plugin_userbanorunban

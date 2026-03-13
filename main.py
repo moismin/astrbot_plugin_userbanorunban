@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from astrbot.api import logger
+from astrbot.api import logger, sp
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import PermissionType, permission_type
 from astrbot.api.star import Context, Star, StarTools, register
@@ -37,6 +37,20 @@ class CJWatchdog(Star):
         self._bans: Dict[str, bool] = self._state["bans"]
         self._save_lock = asyncio.Lock()
         self._init_task: Optional[asyncio.Task] = None
+        self._managed_methods_allow_none = {
+            "turn_on_plugin",
+            "turn_off_plugin",
+            "enable_star",
+            "activate_star",
+            "enable",
+            "activate",
+            "disable_star",
+            "deactivate_star",
+            "disable",
+            "deactivate",
+            "ban_star",
+            "set_star_activated",
+        }
         self._log_info("Initialized. data_dir=%s state_path=%s", self._data_dir, self._state_path)
         self._log_info("Loaded state: timeouts=%d bans=%d", len(self._timeouts), len(self._bans))
 
@@ -206,6 +220,7 @@ class CJWatchdog(Star):
 
     async def _check_timeouts_once(self) -> None:
         stars = self.context.get_all_stars()
+        manually_inactivated = await self._get_manually_inactivated_paths()
         self._log_info(
             "Scanning %d plugins for init timeout. ctx=%s", len(stars), SYSTEM_CONTEXT
         )
@@ -218,6 +233,9 @@ class CJWatchdog(Star):
             if getattr(meta, "reserved", False):
                 continue
             if self._bans.get(name):
+                continue
+            if self._is_manually_inactivated(meta, manually_inactivated):
+                self._timeouts.pop(name, None)
                 continue
             if getattr(meta, "activated", True):
                 if name in self._timeouts:
@@ -235,6 +253,22 @@ class CJWatchdog(Star):
             if self._bans.get(name) or name not in known_names:
                 self._timeouts.pop(name, None)
         await self._save_state()
+
+    async def _get_manually_inactivated_paths(self) -> set[str]:
+        try:
+            stored = await sp.global_get("inactivated_plugins", [])
+        except Exception as exc:
+            self._log_warning("Failed to load inactivated plugin list: %s", exc, exc_info=True)
+            return set()
+        if not isinstance(stored, list):
+            return set()
+        return {str(item) for item in stored if item}
+
+    def _is_manually_inactivated(self, meta: Any, inactivated_paths: set[str]) -> bool:
+        module_path = getattr(meta, "module_path", None)
+        if not module_path:
+            return False
+        return str(module_path) in inactivated_paths
 
     def _get_star_manager(self) -> Optional[Any]:
         for attr in ("star_manager", "plugin_manager", "_star_manager", "_plugin_manager"):
@@ -269,6 +303,8 @@ class CJWatchdog(Star):
                 result = await result
             if isinstance(result, bool):
                 return result
+            if result is None and method in self._managed_methods_allow_none:
+                return True
             return False
         except TypeError as exc:
             self._log_warning(
@@ -284,8 +320,13 @@ class CJWatchdog(Star):
         if not manager:
             self._log_warning("No star manager found.")
             return False
-        if await self._call_manager(manager, "set_star_activated", name, enable):
-            return True
+        preferred = (("turn_on_plugin", (name,)), ("set_star_activated", (name, True))) if enable else (
+            ("turn_off_plugin", (name,)),
+            ("set_star_activated", (name, False)),
+        )
+        for method, args in preferred:
+            if await self._call_manager(manager, method, *args):
+                return True
         if enable:
             methods = ("enable_star", "activate_star", "enable", "activate")
         else:
@@ -311,6 +352,7 @@ class CJWatchdog(Star):
         self._log_info("Unban request: %s ctx=%s", name, ctx)
         if name in self._bans:
             del self._bans[name]
+        self._timeouts.pop(name, None)
         enabled = await self._disable_via_manager(name, enable=True)
         await self._save_state()
         return enabled

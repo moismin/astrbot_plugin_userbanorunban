@@ -1,6 +1,6 @@
-name: 超时插件守护
+name: astrbot_plugin_userbanorunban
 display_name: 超时插件守护
 version: 1.0.0
 author: moismin
-description: 检测插件初始化超时并可手动ban/unban插件
+description: 检测插件初始化超时并支持手动 ban/unban，防止插件超时对回复速度的负面影响
 repo: https://github.com/moismin/astrbot_plugin_userbanorunban
